@@ -1,13 +1,84 @@
 const express = require('express');
 const { Client, GatewayIntentBits, ActivityType, AttachmentBuilder } = require('discord.js');
 const cron = require('node-cron');
-const fs = require('fs/promises');
+const fs = require('fs');
+const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
-// ---------- CLIENT FIRST ----------
+// =====================================================================
+//  ⚙️  CONFIGURATION  -  everything you may want to change is in here
+// =====================================================================
+//  Secrets live in Render environment variables, NOT in this file:
+//    BOT_TOKEN         your Discord bot token
+//    RCLONE_CONF_B64   base64 of your pikpak2 rclone config
+// =====================================================================
+
+// ---------------------------------------------------------------------
+//  1) DISCORD CHANNELS / BOTS
+// ---------------------------------------------------------------------
+const LOG_CHANNEL_ID  = '1530804280720887918';   // logs and errors are sent here
+const TEST_CHANNEL_ID = '1537376472149524480';   // "#test" messages are re-posted here
+const TARGET_BOT_IDS  = ['1531274702067073157']; // bots whose messages get cleaned
+
+// ---------------------------------------------------------------------
+//  2) LINK CLEANER
+// ---------------------------------------------------------------------
+// channel ID -> list of subreddits (lowercase) that get redirected there
+const SUBREDDIT_CHANNEL_GROUPS = {
+  '1544045468013559880': ['scatporn2', 'pee', 'girlsfarting']
+};
+const ALLOWED_EXTS = ['.mp4', '.gif', '.gifv', '.webm'];   // link types that are kept
+const REDDIT_NATIVE_DOMAINS = ['i.redd.it', 'v.redd.it'];  // preferred over other links
+
+// ---------------------------------------------------------------------
+//  3) SCHEDULED IMAGE POSTER
+// ---------------------------------------------------------------------
+const SCHEDULER_ENABLED = true;        // false = turn the whole scheduler off
+const TIMEZONE          = 'Asia/Kolkata';
+const MAX_UPLOAD_MB     = 10;          // Discord upload limit per post (raise if server is boosted)
+const IMAGE_EXTS        = ['.jpg', '.jpeg'];   // file types picked from the queue (e.g. add '.png', '.webp')
+const LOW_QUEUE_WARNING = 5;           // log a warning when this many files or fewer are left (0 = off)
+const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command after this long
+
+// One entry per channel. Copy an entry to post in more channels
+// (each needs its own queue/posting/posted/rejected folders).
+const SCHEDULES = [
+  {
+    channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
+    cron: '0 9,21 * * *',              // WHEN to post (cheat-sheet below)
+    queue:    'pikpak2:queue',         // images waiting to be posted
+    posting:  'pikpak2:posting',       // temporary "claimed" folder (prevents double posts)
+    posted:   'pikpak2:posted',        // images already posted
+    rejected: 'pikpak2:rejected',      // images too big for Discord
+    perPost: 1,                        // images per post (1-10)
+    random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
+    spoiler: false,                    // true = hide images behind a spoiler
+    caption: ''                        // optional text sent with each post
+  }
+  // ,{
+  //   channelId: 'SECOND_CHANNEL_ID',
+  //   cron: '0 */6 * * *',
+  //   queue: 'pikpak2:queue2', posting: 'pikpak2:posting2',
+  //   posted: 'pikpak2:posted2', rejected: 'pikpak2:rejected2',
+  //   perPost: 3, random: false, spoiler: false, caption: ''
+  // }
+];
+
+// CRON CHEAT-SHEET  (minute hour day month weekday)
+//   '0 9,21 * * *'     every day at 09:00 and 21:00
+//   '0 */6 * * *'      every 6 hours
+//   '30 18 * * *'      every day at 18:30
+//   '0 12 * * 1,4'     Mondays and Thursdays at 12:00
+//   '*/30 * * * *'     every 30 minutes
+
+// =====================================================================
+//  END OF CONFIGURATION  -  nothing below needs editing
+// =====================================================================
+
+// ---------- CLIENT ----------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -18,6 +89,7 @@ const client = new Client({
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const schedulerStatus = { jobs: 0, lastPostAt: null, lastError: null };
 
 // ---------- HEALTH ENDPOINT ----------
 app.get('/health', (req, res) =>
@@ -27,38 +99,28 @@ app.get('/health', (req, res) =>
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     ready: client.isReady(),
+    scheduler: schedulerStatus,
     timestamp: new Date().toISOString()
   })
 );
 app.get('/', (req, res) => res.send('Discord Link Cleaner Bot - Health: /health'));
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Health server on port ${PORT}`));
 
-// ---------- CONFIG ----------
-// Keys are lowercase to match .toLowerCase() lookup
-const SUBREDDIT_CHANNEL_GROUPS = {
-  '1544045468013559880': ['scatporn2','pee','girlsfarting']
-};
-
-// Generate subreddit -> channel lookup map
+// ---------- LOOKUP MAPS ----------
 const SUBREDDIT_CHANNEL_MAP = Object.fromEntries(
   Object.entries(SUBREDDIT_CHANNEL_GROUPS)
     .flatMap(([channelId, subreddits]) =>
-      subreddits.map(sub => [sub, channelId])
+      subreddits.map(sub => [sub.toLowerCase(), channelId])
     )
 );
 
-const TARGET_BOT_IDS = ['1531274702067073157'];
-const ALLOWED_EXTS = ['.mp4', '.gif', '.gifv', '.webm'];
-const LOG_CHANNEL_ID = '1530804280720887918';
-const REDDIT_NATIVE_DOMAINS = ['i.redd.it', 'v.redd.it'];
-const TEST_CHANNEL_ID = '1537376472149524480';   // <-- NEW
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------- LOGGER ----------
 const originalLog = console.log;
 const originalError = console.error;
 
-// IMPROVED: only wraps URLs that are not already inside < >
+// only wraps URLs that are not already inside < >
 const suppressEmbeds = text => {
   if (!text) return text;
   return text.replace(
@@ -87,14 +149,24 @@ const logAndSend = async (message, level = 'log') => {
   }
 };
 
+// Errors used to print as "{}" - now they show their message
+const fmtArg = a => {
+  if (a instanceof Error) return a.message;
+  if (typeof a === 'object' && a !== null) return JSON.stringify(a);
+  return String(a);
+};
+
 console.log = (...args) => {
-  const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-  logAndSend(msg);
+  logAndSend(args.map(fmtArg).join(' '));
 };
 console.error = (...args) => {
-  const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-  logAndSend(`❌ ${msg}`, 'error');
+  logAndSend(`❌ ${args.map(fmtArg).join(' ')}`, 'error');
 };
+
+// Never let one stray error kill the bot
+process.on('unhandledRejection', err => {
+  console.error('Unhandled rejection:', err);
+});
 
 // ---------- HELPERS ----------
 const cleanUrl = url => {
@@ -128,7 +200,6 @@ const formatMessage = async (ch, postInfo, urls) => {
   await ch.send('────────── • ────────── • ────────── • ──────────');
 };
 
-// ----- FIXED getPostInfo – greedy title capture -----
 const getPostInfo = content => {
   let title = 'Reddit Post';
   let subreddit = 'unknown';
@@ -157,9 +228,9 @@ const getPostInfo = content => {
   return { title, subreddit, author, subredditLink, postLink };
 };
 
-// ---------- REDDIT PROCESSING LOGIC (refactored) ----------
+// ---------- REDDIT PROCESSING LOGIC ----------
 async function processRedditMessage(msg) {
-  const isTest = msg.content.trim().match(/^#test\b/i);   // <-- detect test command
+  const isTest = msg.content.trim().match(/^#test\b/i);
   const mode = isTest ? '🧪 TEST' : '📩';
 
   console.log(`\n${mode} New message from *${msg.author.tag}* in <#${msg.channel.id}>\n📝 **Content:**\n${msg.content.slice(0, 500)}${msg.content.length > 500 ? '...' : ''}`);
@@ -213,7 +284,6 @@ async function processRedditMessage(msg) {
     );
   }
 
-  // Single comprehensive log for this message
   console.log(
     `🔎 **Analysis:**\n• From: **${msg.author.tag}**\n• Title: ${postInfo.title}\n• Subreddit: r/${postInfo.subreddit}\n` +
     `• URLs: ${urls.length} total, ${allAllowed.length} allowed, ${blocked.length} blocked\n` +
@@ -224,14 +294,14 @@ async function processRedditMessage(msg) {
   if (allAllowed.length === 0 && blocked.length) {
     console.log(`🗑️ No allowed URLs, ${isTest ? 'nothing to send' : 'deleting original message'}`);
     if (!isTest) {
-      return msg.delete();
+      // FIX: a failed delete (already deleted / missing permission) used to crash the bot
+      await msg.delete().catch(console.error);
     }
     return;
   }
 
   if (allAllowed.length) {
     try {
-      // Only delete original if it's NOT a test
       if (!isTest) {
         console.log(`🗑️ Deleting original message...`);
         await msg.delete();
@@ -242,7 +312,6 @@ async function processRedditMessage(msg) {
 
       let targetChannel;
       if (isTest) {
-        // Force test channel
         targetChannel = await client.channels.fetch(TEST_CHANNEL_ID);
         if (!targetChannel) {
           console.error(`❌ Test channel ${TEST_CHANNEL_ID} not found, falling back to original.`);
@@ -251,7 +320,6 @@ async function processRedditMessage(msg) {
           console.log(`🔄 Test message sent to <#${TEST_CHANNEL_ID}>`);
         }
       } else {
-        // Normal redirection logic
         targetChannel = msg.channel;
         const subForRedirect = postInfo.subreddit.toLowerCase();
         if (SUBREDDIT_CHANNEL_MAP[subForRedirect]) {
@@ -286,115 +354,201 @@ async function processRedditMessage(msg) {
   }
 }
 
-// ---------- SCHEDULED JPEG POSTER ----------
+// ---------- SCHEDULED IMAGE POSTER ----------
 const run = promisify(execFile);
-const CONF = path.join(os.tmpdir(), 'rclone.conf');
-const MAX_BYTES = 10 * 1024 * 1024;   // raise if the server is boosted
-const IMG_RE = /\.jpe?g$/i;
-const rc = (...a) =>
-  run('./bin/rclone', ['--config', CONF, ...a], { maxBuffer: 50 * 1024 * 1024 });
+const RCLONE_BIN = path.resolve('bin', 'rclone');
+const RCLONE_CONF = path.join(os.tmpdir(), 'rclone.conf');
+const MAX_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
-const SCHEDULES = [
-  {
-    channelId: '1566080373899657277',
-    cron: '0 9,21 * * *',            // 09:00 and 21:00 IST
-    queue: 'pikpak2:queue',
-    posting: 'pikpak2:posting',
-    posted: 'pikpak2:posted',
-    rejected: 'pikpak2:rejected',
-    perPost: 1                        // JPEGs per post (max 10)
+const rc = (...args) =>
+  run(RCLONE_BIN, ['--config', RCLONE_CONF, ...args], {
+    maxBuffer: 50 * 1024 * 1024,
+    timeout: RCLONE_TIMEOUT_SEC * 1000   // FIX: a hung rclone can no longer block the scheduler forever
+  });
+
+const hasImageExt = name => IMAGE_EXTS.includes(path.extname(name).toLowerCase());
+
+// Fisher-Yates shuffle
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
   }
-];
+  return arr;
+}
 
-async function postJpegs(job) {
-  const ch = await client.channels.fetch(job.channelId);
+let shuttingDown = false;
+let activeRuns = 0;
+
+async function postImages(job) {
+  const ch = await client.channels.fetch(job.channelId).catch(() => null);
+  if (!ch || !ch.isTextBased()) {
+    throw new Error(`Channel ${job.channelId} not found or not a text channel`);
+  }
+
   const { stdout } = await rc('lsjson', job.queue, '--files-only');
-  const files = JSON.parse(stdout)
-    .filter(f => IMG_RE.test(f.Name) && f.Size > 0)
-    .sort((a, b) => a.Name.localeCompare(b.Name));
+  const files = JSON.parse(stdout).filter(f => hasImageExt(f.Name) && f.Size > 0);
 
+  if (job.random) shuffle(files);
+  else files.sort((a, b) => a.Name.localeCompare(b.Name, undefined, { numeric: true }));
+
+  // pick files for this post
   const batch = [];
   let total = 0;
+  let rejectedCount = 0;
+  const maxFiles = Math.min(Math.max(job.perPost, 1), 10);   // Discord max: 10 per message
+
   for (const f of files) {
-    if (batch.length >= Math.min(job.perPost || 1, 10)) break;
+    if (batch.length >= maxFiles) break;
     if (f.Size > MAX_BYTES) {
-      console.error(`${f.Name} too large, moved to rejected`);
+      console.error(`${f.Name} is over ${MAX_UPLOAD_MB} MB, moved to rejected`);
       await rc('moveto', `${job.queue}/${f.Name}`, `${job.rejected}/${f.Name}`).catch(() => {});
+      rejectedCount++;
       continue;
     }
-    if (total + f.Size > MAX_BYTES) break;
+    if (total + f.Size > MAX_BYTES) continue;   // FIX: skip to a smaller file instead of stopping
     batch.push(f);
     total += f.Size;
   }
-  if (!batch.length) return console.log('ℹ️ No JPEGs in queue');
+  if (!batch.length) return console.log(`ℹ️ No images in queue: ${job.queue}`);
 
-  // claim files first so a second run can't grab them
+  // claim files first so a second run can never grab them
   const claimed = [];
   for (const f of batch) {
     try {
       await rc('moveto', `${job.queue}/${f.Name}`, `${job.posting}/${f.Name}`);
       claimed.push(f);
-    } catch {}
+    } catch { /* another run took it, skip */ }
   }
   if (!claimed.length) return;
 
   const tmps = [];
   let sent = false;
   try {
-    for (const f of claimed) {
-      const tmp = path.join(os.tmpdir(), `${Date.now()}_${f.Name}`);
-      await rc('copyto', `${job.posting}/${f.Name}`, tmp);
+    for (let i = 0; i < claimed.length; i++) {
+      const tmp = path.join(os.tmpdir(), `${Date.now()}_${i}_${claimed[i].Name}`);
+      await rc('copyto', `${job.posting}/${claimed[i].Name}`, tmp);
       tmps.push(tmp);
     }
+
     await ch.send({
-      files: tmps.map((t, i) => new AttachmentBuilder(t, { name: claimed[i].Name }))
+      content: job.caption || undefined,
+      files: tmps.map((t, i) =>
+        new AttachmentBuilder(t, { name: (job.spoiler ? 'SPOILER_' : '') + claimed[i].Name })
+      )
     });
     sent = true;
-    for (const f of claimed) {
-      await rc('moveto', `${job.posting}/${f.Name}`, `${job.posted}/${f.Name}`);
-    }
-    console.log(`✅ Posted ${claimed.length} JPEG(s) to <#${job.channelId}>`);
   } catch (e) {
-    if (!sent) {
-      for (const f of claimed) {
-        await rc('moveto', `${job.posting}/${f.Name}`, `${job.queue}/${f.Name}`).catch(() => {});
-      }
+    // not sent: put files back in the queue so nothing is lost
+    for (const f of claimed) {
+      await rc('moveto', `${job.posting}/${f.Name}`, `${job.queue}/${f.Name}`).catch(() => {});
     }
     throw e;
   } finally {
-    await Promise.all(tmps.map(t => fs.unlink(t).catch(() => {})));
+    await Promise.all(tmps.map(t => fsp.unlink(t).catch(() => {})));
+  }
+
+  // sent: file them under "posted"
+  for (const f of claimed) {
+    try {
+      await rc('moveto', `${job.posting}/${f.Name}`, `${job.posted}/${f.Name}`);
+    } catch (e) {
+      console.error(`Posted ${f.Name} but could not move it to posted (left in ${job.posting}): ${e.message}`);
+    }
+  }
+
+  schedulerStatus.lastPostAt = new Date().toISOString();
+  const remaining = files.length - rejectedCount - claimed.length;
+  console.log(`✅ Posted ${claimed.length} image(s) to <#${job.channelId}> - ${remaining} left in queue`);
+  if (LOW_QUEUE_WARNING > 0 && remaining <= LOW_QUEUE_WARNING) {
+    console.log(`⚠️ Queue running low: ${remaining} image(s) left in ${job.queue}`);
   }
 }
 
-let busy = false;
+// On startup: check rclone works and warn about files stuck in "posting"
+async function checkJob(job) {
+  try {
+    const { stdout } = await rc('lsjson', job.posting, '--files-only');
+    const stuck = JSON.parse(stdout);
+    if (stuck.length) {
+      console.error(
+        `${stuck.length} file(s) stuck in ${job.posting} (crash during a post): ` +
+        `${stuck.map(f => f.Name).join(', ')}. ` +
+        `If they were NOT posted, move them back to the queue; if they were, move them to posted.`
+      );
+    }
+  } catch (e) {
+    console.error(`rclone check failed for ${job.posting}: ${e.message}`);
+    schedulerStatus.lastError = e.message;
+  }
+}
+
+let schedulerStarted = false;
 function startSchedules() {
+  if (schedulerStarted) return;
+  if (!SCHEDULER_ENABLED) return console.log('⏸️ Scheduler disabled in config');
   if (!process.env.RCLONE_CONF_B64) {
     return console.error('RCLONE_CONF_B64 not set, scheduler disabled');
   }
-  require('fs').writeFileSync(
-    CONF,
+  schedulerStarted = true;
+
+  fs.writeFileSync(
+    RCLONE_CONF,
     Buffer.from(process.env.RCLONE_CONF_B64, 'base64'),
     { mode: 0o600 }
   );
-  for (const job of SCHEDULES) {
+
+  for (const raw of SCHEDULES) {
+    const job = { perPost: 1, random: false, spoiler: false, caption: '', ...raw };
+
+    if (!/^\d+$/.test(job.channelId)) {
+      console.error(`Schedule skipped: "${job.channelId}" is not a valid channel ID`);
+      continue;
+    }
+    if (!cron.validate(job.cron)) {
+      console.error(`Schedule skipped: invalid cron "${job.cron}" for <#${job.channelId}>`);
+      continue;
+    }
+
+    let running = false;   // FIX: one flag per schedule (a shared flag made schedules block each other)
     cron.schedule(
       job.cron,
       async () => {
-        if (busy) return;
-        busy = true;
+        if (running || shuttingDown) return;
+        running = true;
+        activeRuns++;
         try {
-          await postJpegs(job);
+          await postImages(job);
         } catch (e) {
+          schedulerStatus.lastError = e.message;
           console.error(`Scheduled post failed: ${e.message}`);
         } finally {
-          busy = false;
+          running = false;
+          activeRuns--;
         }
       },
-      { timezone: 'Asia/Kolkata' }
+      { timezone: TIMEZONE }
     );
+
+    schedulerStatus.jobs++;
+    checkJob(job);
   }
-  console.log(`⏰ ${SCHEDULES.length} schedule(s) active`);
+
+  console.log(`⏰ ${schedulerStatus.jobs} schedule(s) active (${TIMEZONE})`);
 }
+
+// Render sends SIGTERM on every deploy/restart: finish any post in progress first
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  originalLog(`${signal} received, waiting for active posts to finish...`);
+  const deadline = Date.now() + 25000;
+  while (activeRuns > 0 && Date.now() < deadline) await sleep(500);
+  client.destroy();
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ---------- BOT EVENTS ----------
 client.once('clientReady', () => {
@@ -407,46 +561,50 @@ client.once('clientReady', () => {
 });
 
 client.on('messageCreate', async msg => {
-  if (msg.author.id === client.user.id) return;
-
-  // ---- Reddit cleaning: target bots OR #test command ----
-  const isTargetBot = TARGET_BOT_IDS.includes(msg.author.id);
-  const isTestCommand = msg.content.trim().match(/^#test\b/i) && !isTargetBot;
-
-  if (isTargetBot || isTestCommand) {
-    await processRedditMessage(msg);
-    return;
-  }
-
-  // ---- Twitter conversion (unchanged) ----
-  if (
-    msg.content.includes('fixupx.com') ||
-    msg.content.includes('fxtwitter.com') ||
-    msg.content.includes('vxtwitter.com')
-  ) return;
-
-  const urls = msg.content.match(/https?:\/\/[^\s<>"]+/gi);
-  if (!urls) return;
-
-  const twitterUrls = urls.filter(u => /x\.com|twitter\.com/i.test(u) && /\/status\//i.test(u));
-  if (twitterUrls.length === 0) return;
-
-  console.log(`\n🐦 Tweet link from ${msg.author.tag} in #${msg.channel.name}`);
-  console.log(`Original: ${msg.content}`);
-
-  const converted = twitterUrls.map(u => {
-    let c = u.replace(/https?:\/\/(www\.)?(x\.com|twitter\.com)/i, 'https://fixupx.com');
-    return c.split('?')[0].replace(/\/+$/, '');
-  });
-  const unique = [...new Set(converted)];
-
-  const reply = unique.map(u => `[•](${u})`).join('\n');
-
   try {
-    await msg.reply(reply);
-    console.log(`✅ Replied with converted tweet(s): ${unique.join(', ')}`);
+    if (msg.author.id === client.user.id) return;
+
+    // ---- Reddit cleaning: target bots OR #test command ----
+    const isTargetBot = TARGET_BOT_IDS.includes(msg.author.id);
+    const isTestCommand = msg.content.trim().match(/^#test\b/i) && !isTargetBot;
+
+    if (isTargetBot || isTestCommand) {
+      await processRedditMessage(msg);
+      return;
+    }
+
+    // ---- Twitter conversion ----
+    if (
+      msg.content.includes('fixupx.com') ||
+      msg.content.includes('fxtwitter.com') ||
+      msg.content.includes('vxtwitter.com')
+    ) return;
+
+    const urls = msg.content.match(/https?:\/\/[^\s<>"]+/gi);
+    if (!urls) return;
+
+    const twitterUrls = urls.filter(u => /x\.com|twitter\.com/i.test(u) && /\/status\//i.test(u));
+    if (twitterUrls.length === 0) return;
+
+    console.log(`\n🐦 Tweet link from ${msg.author.tag} in #${msg.channel.name}`);
+    console.log(`Original: ${msg.content}`);
+
+    const converted = twitterUrls.map(u => {
+      let c = u.replace(/https?:\/\/(www\.)?(x\.com|twitter\.com)/i, 'https://fixupx.com');
+      return c.split('?')[0].replace(/\/+$/, '');
+    });
+    const unique = [...new Set(converted)];
+
+    const reply = unique.map(u => `[•](${u})`).join('\n');
+
+    try {
+      await msg.reply(reply);
+      console.log(`✅ Replied with converted tweet(s): ${unique.join(', ')}`);
+    } catch (e) {
+      console.error(`❌ Tweet conversion error: ${e.message}`);
+    }
   } catch (e) {
-    console.error(`❌ Tweet conversion error: ${e.message}`);
+    console.error(`messageCreate handler error: ${e.message}`);
   }
 });
 
