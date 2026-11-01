@@ -48,7 +48,7 @@ const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command afte
 const SCHEDULES = [
   {
     channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
-    cron: '0 9,21 * * *',              // WHEN to post (cheat-sheet below)
+    cron: '0 */3 * * *',               // WHEN to post (cheat-sheet below)
     queue:    'pikpak2:queue',         // images waiting to be posted
     posting:  'pikpak2:posting',       // temporary "claimed" folder (prevents double posts)
     posted:   'pikpak2:posted',        // images already posted
