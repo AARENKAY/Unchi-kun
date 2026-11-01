@@ -1,5 +1,11 @@
 const express = require('express');
-const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
+const { Client, GatewayIntentBits, ActivityType, AttachmentBuilder } = require('discord.js');
+const cron = require('node-cron');
+const fs = require('fs/promises');
+const path = require('path');
+const os = require('os');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 
 // ---------- CLIENT FIRST ----------
 const client = new Client({
@@ -280,6 +286,116 @@ async function processRedditMessage(msg) {
   }
 }
 
+// ---------- SCHEDULED JPEG POSTER ----------
+const run = promisify(execFile);
+const CONF = path.join(os.tmpdir(), 'rclone.conf');
+const MAX_BYTES = 10 * 1024 * 1024;   // raise if the server is boosted
+const IMG_RE = /\.jpe?g$/i;
+const rc = (...a) =>
+  run('./bin/rclone', ['--config', CONF, ...a], { maxBuffer: 50 * 1024 * 1024 });
+
+const SCHEDULES = [
+  {
+    channelId: '1566080373899657277',
+    cron: '0 9,21 * * *',            // 09:00 and 21:00 IST
+    queue: 'pikpak2:queue',
+    posting: 'pikpak2:posting',
+    posted: 'pikpak2:posted',
+    rejected: 'pikpak2:rejected',
+    perPost: 1                        // JPEGs per post (max 10)
+  }
+];
+
+async function postJpegs(job) {
+  const ch = await client.channels.fetch(job.channelId);
+  const { stdout } = await rc('lsjson', job.queue, '--files-only');
+  const files = JSON.parse(stdout)
+    .filter(f => IMG_RE.test(f.Name) && f.Size > 0)
+    .sort((a, b) => a.Name.localeCompare(b.Name));
+
+  const batch = [];
+  let total = 0;
+  for (const f of files) {
+    if (batch.length >= Math.min(job.perPost || 1, 10)) break;
+    if (f.Size > MAX_BYTES) {
+      console.error(`${f.Name} too large, moved to rejected`);
+      await rc('moveto', `${job.queue}/${f.Name}`, `${job.rejected}/${f.Name}`).catch(() => {});
+      continue;
+    }
+    if (total + f.Size > MAX_BYTES) break;
+    batch.push(f);
+    total += f.Size;
+  }
+  if (!batch.length) return console.log('ℹ️ No JPEGs in queue');
+
+  // claim files first so a second run can't grab them
+  const claimed = [];
+  for (const f of batch) {
+    try {
+      await rc('moveto', `${job.queue}/${f.Name}`, `${job.posting}/${f.Name}`);
+      claimed.push(f);
+    } catch {}
+  }
+  if (!claimed.length) return;
+
+  const tmps = [];
+  let sent = false;
+  try {
+    for (const f of claimed) {
+      const tmp = path.join(os.tmpdir(), `${Date.now()}_${f.Name}`);
+      await rc('copyto', `${job.posting}/${f.Name}`, tmp);
+      tmps.push(tmp);
+    }
+    await ch.send({
+      files: tmps.map((t, i) => new AttachmentBuilder(t, { name: claimed[i].Name }))
+    });
+    sent = true;
+    for (const f of claimed) {
+      await rc('moveto', `${job.posting}/${f.Name}`, `${job.posted}/${f.Name}`);
+    }
+    console.log(`✅ Posted ${claimed.length} JPEG(s) to <#${job.channelId}>`);
+  } catch (e) {
+    if (!sent) {
+      for (const f of claimed) {
+        await rc('moveto', `${job.posting}/${f.Name}`, `${job.queue}/${f.Name}`).catch(() => {});
+      }
+    }
+    throw e;
+  } finally {
+    await Promise.all(tmps.map(t => fs.unlink(t).catch(() => {})));
+  }
+}
+
+let busy = false;
+function startSchedules() {
+  if (!process.env.RCLONE_CONF_B64) {
+    return console.error('RCLONE_CONF_B64 not set, scheduler disabled');
+  }
+  require('fs').writeFileSync(
+    CONF,
+    Buffer.from(process.env.RCLONE_CONF_B64, 'base64'),
+    { mode: 0o600 }
+  );
+  for (const job of SCHEDULES) {
+    cron.schedule(
+      job.cron,
+      async () => {
+        if (busy) return;
+        busy = true;
+        try {
+          await postJpegs(job);
+        } catch (e) {
+          console.error(`Scheduled post failed: ${e.message}`);
+        } finally {
+          busy = false;
+        }
+      },
+      { timezone: 'Asia/Kolkata' }
+    );
+  }
+  console.log(`⏰ ${SCHEDULES.length} schedule(s) active`);
+}
+
 // ---------- BOT EVENTS ----------
 client.once('clientReady', () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
@@ -287,6 +403,7 @@ client.once('clientReady', () => {
     activities: [{ name: 'Cleaning links...', type: ActivityType.Watching }],
     status: 'online'
   });
+  startSchedules();
 });
 
 client.on('messageCreate', async msg => {
