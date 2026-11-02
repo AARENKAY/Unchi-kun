@@ -49,10 +49,10 @@ const SCHEDULES = [
   {
     channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
     cron: '0 */3 * * *',               // WHEN to post (cheat-sheet below)
-    queue:    'pikpak2:queue',         // images waiting to be posted
-    posting:  'pikpak2:posting',       // temporary "claimed" folder (prevents double posts)
-    posted:   'pikpak2:posted',        // images already posted
-    rejected: 'pikpak2:rejected',      // images too big for Discord
+    queue:    'pikpak2:discord/queue',         // images waiting to be posted
+    posting:  'pikpak2:discord/posting',       // temporary "claimed" folder (prevents double posts)
+    posted:   'pikpak2:discord/posted',        // images already posted
+    rejected: 'pikpak2:discord/rejected',      // images too big for Discord
     perPost: 1,                        // images per post (1-10)
     random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
     spoiler: false,                    // true = hide images behind a spoiler
