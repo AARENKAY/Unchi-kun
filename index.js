@@ -41,7 +41,7 @@ const REDDIT_NATIVE_DOMAINS = ['i.redd.it', 'v.redd.it'];  // preferred over oth
 // ---------------------------------------------------------------------
 const SCHEDULER_ENABLED = true;        // false = turn the whole scheduler off
 const TIMEZONE          = 'Asia/Kolkata';
-const MAX_UPLOAD_MB     = 10;          // Discord upload limit per post (raise if server is boosted)
+const MAX_UPLOAD_MB     = 11;          // Discord upload limit per post (raise if server is boosted)
 const IMAGE_EXTS        = ['.jpg', '.jpeg'];   // file types picked from the queue (e.g. add '.png', '.webp')
 const LOW_QUEUE_WARNING = 5;           // log a warning when this many files or fewer are left (0 = off)
 const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command after this long
