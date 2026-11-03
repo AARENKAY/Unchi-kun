@@ -60,14 +60,19 @@ const SCHEDULES = [
     random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
     spoiler: false,                    // true = hide images behind a spoiler
     caption: ''                        // optional text sent with each post
+  },
+  {
+    channelId: '1567144051797401630',  // right-click channel -> Copy Channel ID
+    cron: '30 */3 * * *',               // WHEN to post (cheat-sheet below)
+    queue:    'pikpak2:AiXstasy/queue',         // images waiting to be posted
+    posting:  'pikpak2:AiXstasy/posting',       // temporary "claimed" folder (prevents double posts)
+    posted:   'pikpak2:AiXstasy/posted',        // images already posted
+    rejected: 'pikpak2:AiXstasy/rejected',      // images too big for Discord
+    perPost: 1,                        // images per post (1-10)
+    random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
+    spoiler: false,                    // true = hide images behind a spoiler
+    caption: ''                        // optional text sent with each post
   }
-  // ,{
-  //   channelId: 'SECOND_CHANNEL_ID',
-  //   cron: '0 */6 * * *',
-  //   queue: 'pikpak2:queue2', posting: 'pikpak2:posting2',
-  //   posted: 'pikpak2:posted2', rejected: 'pikpak2:rejected2',
-  //   perPost: 3, random: false, spoiler: false, caption: ''
-  // }
 ];
 
 // CRON CHEAT-SHEET  (minute hour day month weekday)
