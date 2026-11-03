@@ -37,12 +37,12 @@ const ALLOWED_EXTS = ['.mp4', '.gif', '.gifv', '.webm'];   // link types that ar
 const REDDIT_NATIVE_DOMAINS = ['i.redd.it', 'v.redd.it'];  // preferred over other links
 
 // ---------------------------------------------------------------------
-//  3) SCHEDULED IMAGE POSTER
+//  3) SCHEDULED FILE POSTER
 // ---------------------------------------------------------------------
 const SCHEDULER_ENABLED = true;        // false = turn the whole scheduler off
 const TIMEZONE          = 'Asia/Kolkata';
 const MAX_UPLOAD_MB     = 11;          // Discord upload limit per post (raise if server is boosted)
-const IMAGE_EXTS        = ['.jpg', '.jpeg', '.png', '.gif', '.mp4'];   // file types picked from the queue (e.g. add '.png', '.webp')
+const FILE_EXTS         = ['.jpg', '.jpeg', '.png', '.gif', '.mp4'];   // file types picked from the queue (add or remove as needed)
 const LOW_QUEUE_WARNING = 5;           // log a warning when this many files or fewer are left (0 = off)
 const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command after this long
 
@@ -52,25 +52,25 @@ const SCHEDULES = [
   {
     channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
     cron: '0 */3 * * *',               // WHEN to post (cheat-sheet below)
-    queue:    'pikpak2:Discord/queue',         // images waiting to be posted
+    queue:    'pikpak2:Discord/queue',         // files waiting to be posted
     posting:  'pikpak2:Discord/posting',       // temporary "claimed" folder (prevents double posts)
-    posted:   'pikpak2:Discord/posted',        // images already posted
-    rejected: 'pikpak2:Discord/rejected',      // images too big for Discord
-    perPost: 1,                        // images per post (1-10)
+    posted:   'pikpak2:Discord/posted',        // files already posted
+    rejected: 'pikpak2:Discord/rejected',      // files too big for Discord
+    perPost: 1,                        // files per post (1-10)
     random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
-    spoiler: false,                    // true = hide images behind a spoiler
+    spoiler: false,                    // true = hide files behind a spoiler
     caption: ''                        // optional text sent with each post
   },
   {
     channelId: '1567144051797401630',  // right-click channel -> Copy Channel ID
-    cron: '30 */3 * * *',               // WHEN to post (cheat-sheet below)
-    queue:    'pikpak2:AiXstasy/queue',         // images waiting to be posted
+    cron: '30 */3 * * *',              // WHEN to post (cheat-sheet below)
+    queue:    'pikpak2:AiXstasy/queue',         // files waiting to be posted
     posting:  'pikpak2:AiXstasy/posting',       // temporary "claimed" folder (prevents double posts)
-    posted:   'pikpak2:AiXstasy/posted',        // images already posted
-    rejected: 'pikpak2:AiXstasy/rejected',      // images too big for Discord
-    perPost: 1,                        // images per post (1-10)
+    posted:   'pikpak2:AiXstasy/posted',        // files already posted
+    rejected: 'pikpak2:AiXstasy/rejected',      // files too big for Discord
+    perPost: 1,                        // files per post (1-10)
     random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
-    spoiler: false,                    // true = hide images behind a spoiler
+    spoiler: false,                    // true = hide files behind a spoiler
     caption: ''                        // optional text sent with each post
   }
 ];
@@ -180,7 +180,7 @@ process.on('unhandledRejection', err => {
 const FEATURES = {
   reddit:    'Reddit link cleaner',
   twitter:   'Twitter link converter',
-  scheduler: 'Scheduled image poster'
+  scheduler: 'Scheduled file poster'
 };
 const features = { reddit: true, twitter: true, scheduler: true };   // defaults when nothing is saved yet
 const STATE_PREFIX = '⚙️ BOT_STATE ';   // the bot keeps its switches in one pinned message in the log channel
@@ -394,7 +394,7 @@ async function processRedditMessage(msg) {
   if (allAllowed.length === 0 && blocked.length) {
     console.log(`🗑️ No allowed URLs, ${isTest ? 'nothing to send' : 'deleting original message'}`);
     if (!isTest) {
-      // FIX: a failed delete (already deleted / missing permission) used to crash the bot
+      // a failed delete (already deleted / missing permission) must not crash the bot
       await msg.delete().catch(console.error);
     }
     return;
@@ -454,19 +454,86 @@ async function processRedditMessage(msg) {
   }
 }
 
-// ---------- SCHEDULED IMAGE POSTER ----------
+// ---------- SCHEDULED FILE POSTER ----------
 const run = promisify(execFile);
 const RCLONE_BIN = path.resolve('bin', 'rclone');
 const RCLONE_CONF = path.join(os.tmpdir(), 'rclone.conf');
 const MAX_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
-const rc = (...args) =>
+// The rclone config file always comes from the RCLONE_CONF_B64 environment variable.
+// This (re)writes a fresh copy of it to disk.
+function writeRcloneConfig() {
+  fs.writeFileSync(
+    RCLONE_CONF,
+    Buffer.from(process.env.RCLONE_CONF_B64 || '', 'base64'),
+    { mode: 0o600 }
+  );
+}
+
+// Reads the config and logs clear errors if it looks broken (never prints secrets)
+function checkRcloneConfig(jobs) {
+  let text = '';
+  try { text = fs.readFileSync(RCLONE_CONF, 'utf8'); } catch {}
+
+  const remotes = {};
+  let current = null;
+  for (const line of text.split(/\r?\n/)) {
+    const sec = line.match(/^\[(.+)\]\s*$/);
+    if (sec) { current = sec[1]; remotes[current] = {}; continue; }
+    const kv = line.match(/^(\w+)\s*=\s*(.*)$/);
+    if (kv && current) remotes[current][kv[1]] = kv[2].trim();
+  }
+
+  const names = Object.keys(remotes);
+  if (!names.length) {
+    console.error('RCLONE_CONF_B64 decoded to an empty or invalid config - re-export it from Termux and paste it again');
+    return;
+  }
+  console.log(`🔑 rclone config loaded, remotes: ${names.join(', ')}`);
+
+  const used = new Set(jobs.map(j => j.queue.split(':')[0]));
+  for (const name of used) {
+    if (!remotes[name]) {
+      console.error(`Remote "${name}" is used in SCHEDULES but missing from RCLONE_CONF_B64`);
+      continue;
+    }
+    const pass = remotes[name].pass;
+    if (pass && !/^[A-Za-z0-9_-]+$/.test(pass)) {
+      console.error(`The password saved for remote "${name}" is not in rclone's obscured format - the env var content is damaged, re-export it from Termux`);
+    }
+  }
+}
+
+const RCLONE_CONFIG_ERROR = /failed to decode password|Failed to create file system|couldn't decrypt/i;
+
+const rcOnce = (...args) =>
   run(RCLONE_BIN, ['--config', RCLONE_CONF, ...args], {
     maxBuffer: 50 * 1024 * 1024,
-    timeout: RCLONE_TIMEOUT_SEC * 1000   // FIX: a hung rclone can no longer block the scheduler forever
+    timeout: RCLONE_TIMEOUT_SEC * 1000   // a hung rclone can no longer block the scheduler forever
   });
 
-const hasImageExt = name => IMAGE_EXTS.includes(path.extname(name).toLowerCase());
+// All rclone calls run ONE AT A TIME (several rclone processes rewriting the same
+// config file at once can corrupt it). If a config error shows up, the config is
+// restored from the environment variable and the command is retried once.
+let rcQueue = Promise.resolve();
+const rc = (...args) => {
+  const task = rcQueue.then(async () => {
+    try {
+      return await rcOnce(...args);
+    } catch (e) {
+      if (RCLONE_CONFIG_ERROR.test(`${e.message} ${e.stderr || ''}`)) {
+        console.log('🔧 rclone config problem detected, restoring it from RCLONE_CONF_B64 and retrying');
+        writeRcloneConfig();
+        return await rcOnce(...args);
+      }
+      throw e;
+    }
+  });
+  rcQueue = task.catch(() => {});
+  return task;
+};
+
+const hasAllowedExt = name => FILE_EXTS.includes(path.extname(name).toLowerCase());
 
 // Fisher-Yates shuffle
 function shuffle(arr) {
@@ -480,14 +547,14 @@ function shuffle(arr) {
 let shuttingDown = false;
 let activeRuns = 0;
 
-async function postImages(job) {
+async function postFiles(job) {
   const ch = await client.channels.fetch(job.channelId).catch(() => null);
   if (!ch || !ch.isTextBased()) {
     throw new Error(`Channel ${job.channelId} not found or not a text channel`);
   }
 
   const { stdout } = await rc('lsjson', job.queue, '--files-only');
-  const files = JSON.parse(stdout).filter(f => hasImageExt(f.Name) && f.Size > 0);
+  const files = JSON.parse(stdout).filter(f => hasAllowedExt(f.Name) && f.Size > 0);
 
   if (job.random) shuffle(files);
   else files.sort((a, b) => a.Name.localeCompare(b.Name, undefined, { numeric: true }));
@@ -506,11 +573,11 @@ async function postImages(job) {
       rejectedCount++;
       continue;
     }
-    if (total + f.Size > MAX_BYTES) continue;   // FIX: skip to a smaller file instead of stopping
+    if (total + f.Size > MAX_BYTES) continue;   // skip to a smaller file instead of stopping
     batch.push(f);
     total += f.Size;
   }
-  if (!batch.length) return console.log(`ℹ️ No images in queue: ${job.queue}`);
+  if (!batch.length) return console.log(`ℹ️ No files in queue: ${job.queue}`);
 
   // claim files first so a second run can never grab them
   const claimed = [];
@@ -523,7 +590,6 @@ async function postImages(job) {
   if (!claimed.length) return;
 
   const tmps = [];
-  let sent = false;
   try {
     for (let i = 0; i < claimed.length; i++) {
       const tmp = path.join(os.tmpdir(), `${Date.now()}_${i}_${claimed[i].Name}`);
@@ -537,7 +603,6 @@ async function postImages(job) {
         new AttachmentBuilder(t, { name: (job.spoiler ? 'SPOILER_' : '') + claimed[i].Name })
       )
     });
-    sent = true;
   } catch (e) {
     // not sent: put files back in the queue so nothing is lost
     for (const f of claimed) {
@@ -559,9 +624,9 @@ async function postImages(job) {
 
   schedulerStatus.lastPostAt = new Date().toISOString();
   const remaining = files.length - rejectedCount - claimed.length;
-  console.log(`✅ Posted ${claimed.length} image(s) to <#${job.channelId}> - ${remaining} left in queue`);
+  console.log(`✅ Posted ${claimed.length} file(s) to <#${job.channelId}> - ${remaining} left in queue`);
   if (LOW_QUEUE_WARNING > 0 && remaining <= LOW_QUEUE_WARNING) {
-    console.log(`⚠️ Queue running low: ${remaining} image(s) left in ${job.queue}`);
+    console.log(`⚠️ Queue running low: ${remaining} file(s) left in ${job.queue}`);
   }
 }
 
@@ -592,11 +657,8 @@ function startSchedules() {
   }
   schedulerStarted = true;
 
-  fs.writeFileSync(
-    RCLONE_CONF,
-    Buffer.from(process.env.RCLONE_CONF_B64, 'base64'),
-    { mode: 0o600 }
-  );
+  writeRcloneConfig();
+  checkRcloneConfig(SCHEDULES);
 
   for (const raw of SCHEDULES) {
     const job = { perPost: 1, random: false, spoiler: false, caption: '', ...raw };
@@ -610,7 +672,7 @@ function startSchedules() {
       continue;
     }
 
-    let running = false;   // FIX: one flag per schedule (a shared flag made schedules block each other)
+    let running = false;   // one flag per schedule so schedules never block each other
     cron.schedule(
       job.cron,
       async () => {
@@ -619,7 +681,7 @@ function startSchedules() {
         running = true;
         activeRuns++;
         try {
-          await postImages(job);
+          await postFiles(job);
         } catch (e) {
           schedulerStatus.lastError = e.message;
           console.error(`Scheduled post failed: ${e.message}`);
