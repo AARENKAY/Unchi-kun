@@ -48,11 +48,19 @@ const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command afte
 
 // One entry per channel. Copy an entry to post in more channels
 // (each needs its own queue/posting/posted/rejected folders).
+//
+// SPLIT QUEUES: "queue" can be ONE folder ('pikpak2:Discord/queue') or a LIST of folders.
+// With a list, every run picks one folder at random and lists only that one (fast, even
+// with thousands of files). A folder that is empty or missing is skipped automatically.
 const SCHEDULES = [
   {
     channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
     cron: '0 * * * *',               // WHEN to post (cheat-sheet below)
-    queue:    'pikpak2:Discord/queue',         // files waiting to be posted
+    queue: [                           // files waiting to be posted (add more folders here)
+      'pikpak2:Discord/queue',
+      'pikpak2:Discord/queue2',
+      'pikpak2:Discord/queue3',
+    ],
     posting:  'pikpak2:Discord/posting',       // temporary "claimed" folder (prevents double posts)
     posted:   'pikpak2:Discord/posted',        // files already posted
     rejected: 'pikpak2:Discord/rejected',      // files too big for Discord
@@ -64,7 +72,11 @@ const SCHEDULES = [
   {
     channelId: '1567144051797401630',  // right-click channel -> Copy Channel ID
     cron: '5 * * * *',              // WHEN to post (cheat-sheet below)
-    queue:    'pikpak2:AiXstasy/queue',         // files waiting to be posted
+    queue: [                           // files waiting to be posted (add more folders here)
+      'pikpak2:AiXstasy/queue',
+      'pikpak2:AiXstasy/queue2',
+      'pikpak2:AiXstasy/queue3',
+    ],
     posting:  'pikpak2:AiXstasy/posting',       // temporary "claimed" folder (prevents double posts)
     posted:   'pikpak2:AiXstasy/posted',        // files already posted
     rejected: 'pikpak2:AiXstasy/rejected',      // files too big for Discord
@@ -491,7 +503,7 @@ function checkRcloneConfig(jobs) {
   }
   console.log(`🔑 rclone config loaded, remotes: ${names.join(', ')}`);
 
-  const used = new Set(jobs.map(j => j.queue.split(':')[0]));
+  const used = new Set(jobs.flatMap(j => [].concat(j.queue)).map(q => q.split(':')[0]));
   for (const name of used) {
     if (!remotes[name]) {
       console.error(`Remote "${name}" is used in SCHEDULES but missing from RCLONE_CONF_B64`);
@@ -546,6 +558,7 @@ function shuffle(arr) {
 
 let shuttingDown = false;
 let activeRuns = 0;
+const warnedQueues = new Set();   // queue folders already reported as unreadable
 
 async function postFiles(job) {
   const ch = await client.channels.fetch(job.channelId).catch(() => null);
@@ -553,8 +566,24 @@ async function postFiles(job) {
     throw new Error(`Channel ${job.channelId} not found or not a text channel`);
   }
 
-  const { stdout } = await rc('lsjson', job.queue, '--files-only');
-  const files = JSON.parse(stdout).filter(f => hasAllowedExt(f.Name) && f.Size > 0);
+  // pick ONE queue folder per run: folders are tried in random order and the first one
+  // that has usable files wins (empty or unreadable folders are skipped)
+  const queues = shuffle([].concat(job.queue));
+  let queueDir = null;
+  let files = [];
+  for (const q of queues) {
+    try {
+      const { stdout } = await rc('lsjson', q, '--files-only');
+      const list = JSON.parse(stdout).filter(f => hasAllowedExt(f.Name) && f.Size > 0);
+      if (list.length) { queueDir = q; files = list; break; }
+    } catch (e) {
+      if (!warnedQueues.has(q)) {
+        warnedQueues.add(q);   // warn once per folder, not every run
+        console.error(`Cannot read queue folder ${q} (skipping it, will not warn again): ${e.message}`);
+      }
+    }
+  }
+  if (!queueDir) return console.log(`ℹ️ No files in any queue folder: ${queues.join(', ')}`);
 
   if (job.random) shuffle(files);
   else files.sort((a, b) => a.Name.localeCompare(b.Name, undefined, { numeric: true }));
@@ -569,7 +598,7 @@ async function postFiles(job) {
     if (batch.length >= maxFiles) break;
     if (f.Size > MAX_BYTES) {
       console.error(`${f.Name} is over ${MAX_UPLOAD_MB} MB, moved to rejected`);
-      await rc('moveto', `${job.queue}/${f.Name}`, `${job.rejected}/${f.Name}`).catch(() => {});
+      await rc('moveto', `${queueDir}/${f.Name}`, `${job.rejected}/${f.Name}`).catch(() => {});
       rejectedCount++;
       continue;
     }
@@ -577,13 +606,13 @@ async function postFiles(job) {
     batch.push(f);
     total += f.Size;
   }
-  if (!batch.length) return console.log(`ℹ️ No files in queue: ${job.queue}`);
+  if (!batch.length) return console.log(`ℹ️ No postable files in ${queueDir}`);
 
   // claim files first so a second run can never grab them
   const claimed = [];
   for (const f of batch) {
     try {
-      await rc('moveto', `${job.queue}/${f.Name}`, `${job.posting}/${f.Name}`);
+      await rc('moveto', `${queueDir}/${f.Name}`, `${job.posting}/${f.Name}`);
       claimed.push(f);
     } catch { /* another run took it, skip */ }
   }
@@ -606,7 +635,7 @@ async function postFiles(job) {
   } catch (e) {
     // not sent: put files back in the queue so nothing is lost
     for (const f of claimed) {
-      await rc('moveto', `${job.posting}/${f.Name}`, `${job.queue}/${f.Name}`).catch(() => {});
+      await rc('moveto', `${job.posting}/${f.Name}`, `${queueDir}/${f.Name}`).catch(() => {});
     }
     throw e;
   } finally {
@@ -624,9 +653,9 @@ async function postFiles(job) {
 
   schedulerStatus.lastPostAt = new Date().toISOString();
   const remaining = files.length - rejectedCount - claimed.length;
-  console.log(`✅ Posted ${claimed.length} file(s) to <#${job.channelId}> - ${remaining} left in queue`);
+  console.log(`✅ Posted ${claimed.length} file(s) to <#${job.channelId}> - ${remaining} left in ${queueDir}`);
   if (LOW_QUEUE_WARNING > 0 && remaining <= LOW_QUEUE_WARNING) {
-    console.log(`⚠️ Queue running low: ${remaining} file(s) left in ${job.queue}`);
+    console.log(`⚠️ Queue folder running low: ${remaining} file(s) left in ${queueDir}`);
   }
 }
 
