@@ -51,7 +51,7 @@ const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command afte
 const SCHEDULES = [
   {
     channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
-    cron: '0 */3 * * *',               // WHEN to post (cheat-sheet below)
+    cron: '0 * * * *',               // WHEN to post (cheat-sheet below)
     queue:    'pikpak2:Discord/queue',         // files waiting to be posted
     posting:  'pikpak2:Discord/posting',       // temporary "claimed" folder (prevents double posts)
     posted:   'pikpak2:Discord/posted',        // files already posted
@@ -63,7 +63,7 @@ const SCHEDULES = [
   },
   {
     channelId: '1567144051797401630',  // right-click channel -> Copy Channel ID
-    cron: '30 */3 * * *',              // WHEN to post (cheat-sheet below)
+    cron: '5 * * * *',              // WHEN to post (cheat-sheet below)
     queue:    'pikpak2:AiXstasy/queue',         // files waiting to be posted
     posting:  'pikpak2:AiXstasy/posting',       // temporary "claimed" folder (prevents double posts)
     posted:   'pikpak2:AiXstasy/posted',        // files already posted
