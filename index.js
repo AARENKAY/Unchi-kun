@@ -52,9 +52,13 @@ const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command afte
 // SPLIT QUEUES: "queue" can be ONE folder ('pikpak2:Discord/queue') or a LIST of folders.
 // With a list, every run picks one folder at random and lists only that one (fast, even
 // with thousands of files). A folder that is empty or missing is skipped automatically.
+//
+// LOG CHANNEL PER SCHEDULE: logChannelId = where THIS schedule's messages go (posted, queue
+// low, errors, files stuck in "posting"). Leave it '' to use the global LOG_CHANNEL_ID above.
 const SCHEDULES = [
   {
     channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
+    logChannelId: '',                  // log channel for this schedule ('' = use the global one)
     cron: '0 * * * *',               // WHEN to post (cheat-sheet below)
     queue: [                           // files waiting to be posted (add more folders here)
       'pikpak2:Discord/queue',
@@ -71,6 +75,7 @@ const SCHEDULES = [
   },
   {
     channelId: '1567144051797401630',  // right-click channel -> Copy Channel ID
+    logChannelId: '',                  // log channel for this schedule ('' = use the global one)
     cron: '5 * * * *',              // WHEN to post (cheat-sheet below)
     queue: [                           // files waiting to be posted (add more folders here)
       'pikpak2:AiXstasy/queue',
@@ -149,23 +154,27 @@ const suppressEmbeds = text => {
   );
 };
 
-const logAndSend = async (message, level = 'log') => {
+// targetId = which channel gets the message (default: the global log channel).
+// If a schedule's own log channel can't be used, the message goes to the global one instead.
+const logAndSend = async (message, level = 'log', targetId = LOG_CHANNEL_ID) => {
   originalLog(message);
 
+  let msg = suppressEmbeds(message);
+  if (msg.length > 1900) {
+    msg = msg.slice(0, 1900) + '... (truncated)';
+  }
+
   try {
-    const channel = await client.channels.fetch(LOG_CHANNEL_ID);
-    if (!channel) return;
-
-    let msg = suppressEmbeds(message);
-
-    if (msg.length > 1900) {
-      msg = msg.slice(0, 1900) + '... (truncated)';
-    }
-
+    const channel = await client.channels.fetch(targetId);
+    if (!channel) throw new Error('channel not found');
     await channel.send(msg);
-
   } catch (e) {
-    originalError('Failed to send log to Discord:', e.message);
+    originalError(`Failed to send log to Discord (${targetId}):`, e.message);
+    if (targetId === LOG_CHANNEL_ID) return;
+    try {
+      const fallback = await client.channels.fetch(LOG_CHANNEL_ID);
+      await fallback.send(`${msg}\n⚠️ (could not write to log channel <#${targetId}>, check the ID and the bot's permissions)`.slice(0, 2000));
+    } catch { /* nothing more we can do */ }
   }
 };
 
@@ -579,11 +588,11 @@ async function postFiles(job) {
     } catch (e) {
       if (!warnedQueues.has(q)) {
         warnedQueues.add(q);   // warn once per folder, not every run
-        console.error(`Cannot read queue folder ${q} (skipping it, will not warn again): ${e.message}`);
+        job.err(`Cannot read queue folder ${q} (skipping it, will not warn again): ${e.message}`);
       }
     }
   }
-  if (!queueDir) return console.log(`ℹ️ No files in any queue folder: ${queues.join(', ')}`);
+  if (!queueDir) return job.log(`ℹ️ No files in any queue folder: ${queues.join(', ')}`);
 
   if (job.random) shuffle(files);
   else files.sort((a, b) => a.Name.localeCompare(b.Name, undefined, { numeric: true }));
@@ -597,7 +606,7 @@ async function postFiles(job) {
   for (const f of files) {
     if (batch.length >= maxFiles) break;
     if (f.Size > MAX_BYTES) {
-      console.error(`${f.Name} is over ${MAX_UPLOAD_MB} MB, moved to rejected`);
+      job.err(`${f.Name} is over ${MAX_UPLOAD_MB} MB, moved to rejected`);
       await rc('moveto', `${queueDir}/${f.Name}`, `${job.rejected}/${f.Name}`).catch(() => {});
       rejectedCount++;
       continue;
@@ -606,7 +615,7 @@ async function postFiles(job) {
     batch.push(f);
     total += f.Size;
   }
-  if (!batch.length) return console.log(`ℹ️ No postable files in ${queueDir}`);
+  if (!batch.length) return job.log(`ℹ️ No postable files in ${queueDir}`);
 
   // claim files first so a second run can never grab them
   const claimed = [];
@@ -647,15 +656,15 @@ async function postFiles(job) {
     try {
       await rc('moveto', `${job.posting}/${f.Name}`, `${job.posted}/${f.Name}`);
     } catch (e) {
-      console.error(`Posted ${f.Name} but could not move it to posted (left in ${job.posting}): ${e.message}`);
+      job.err(`Posted ${f.Name} but could not move it to posted (left in ${job.posting}): ${e.message}`);
     }
   }
 
   schedulerStatus.lastPostAt = new Date().toISOString();
   const remaining = files.length - rejectedCount - claimed.length;
-  console.log(`✅ Posted ${claimed.length} file(s) to <#${job.channelId}> - ${remaining} left in ${queueDir}`);
+  job.log(`✅ Posted ${claimed.length} file(s) to <#${job.channelId}> - ${remaining} left in ${queueDir}`);
   if (LOW_QUEUE_WARNING > 0 && remaining <= LOW_QUEUE_WARNING) {
-    console.log(`⚠️ Queue folder running low: ${remaining} file(s) left in ${queueDir}`);
+    job.log(`⚠️ Queue folder running low: ${remaining} file(s) left in ${queueDir}`);
   }
 }
 
@@ -665,14 +674,14 @@ async function checkJob(job) {
     const { stdout } = await rc('lsjson', job.posting, '--files-only');
     const stuck = JSON.parse(stdout);
     if (stuck.length) {
-      console.error(
+      job.err(
         `${stuck.length} file(s) stuck in ${job.posting} (crash during a post): ` +
         `${stuck.map(f => f.Name).join(', ')}. ` +
         `If they were NOT posted, move them back to the queue; if they were, move them to posted.`
       );
     }
   } catch (e) {
-    console.error(`rclone check failed for ${job.posting}: ${e.message}`);
+    job.err(`rclone check failed for ${job.posting}: ${e.message}`);
     schedulerStatus.lastError = e.message;
   }
 }
@@ -690,7 +699,7 @@ function startSchedules() {
   checkRcloneConfig(SCHEDULES);
 
   for (const raw of SCHEDULES) {
-    const job = { perPost: 1, random: false, spoiler: false, caption: '', ...raw };
+    const job = { perPost: 1, random: false, spoiler: false, caption: '', logChannelId: '', ...raw };
 
     if (!/^\d+$/.test(job.channelId)) {
       console.error(`Schedule skipped: "${job.channelId}" is not a valid channel ID`);
@@ -700,6 +709,16 @@ function startSchedules() {
       console.error(`Schedule skipped: invalid cron "${job.cron}" for <#${job.channelId}>`);
       continue;
     }
+
+    // this schedule's own log channel ('' or missing = the global LOG_CHANNEL_ID)
+    job.logChannelId = String(job.logChannelId || '').trim();
+    if (job.logChannelId && !/^\d+$/.test(job.logChannelId)) {
+      console.error(`logChannelId "${job.logChannelId}" for <#${job.channelId}> is not a valid channel ID, using the default log channel`);
+      job.logChannelId = '';
+    }
+    const logTo = job.logChannelId || LOG_CHANNEL_ID;
+    job.log = (...args) => logAndSend(args.map(fmtArg).join(' '), 'log', logTo);
+    job.err = (...args) => logAndSend(`❌ ${args.map(fmtArg).join(' ')}`, 'error', logTo);
 
     let running = false;   // one flag per schedule so schedules never block each other
     cron.schedule(
@@ -713,7 +732,7 @@ function startSchedules() {
           await postFiles(job);
         } catch (e) {
           schedulerStatus.lastError = e.message;
-          console.error(`Scheduled post failed: ${e.message}`);
+          job.err(`Scheduled post failed: ${e.message}`);
         } finally {
           running = false;
           activeRuns--;
