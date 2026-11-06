@@ -1,16 +1,15 @@
 {
-  "name": "discord-link-cleaner",
-  "version": "3.0.0",
-  "description": "Discord bot that cleans links from specific bots",
+  "name": "discord-bot",
+  "version": "3.1.0",
+  "description": "Discord bot that converts Twitter/X links and posts files on a schedule",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-  "discord.js": "^14.14.1",
-  "express": "^4.18.2",
-  "axios": "^1.6.0",
-  "node-cron": "^3.0.3"
+    "discord.js": "^14.14.1",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -18,7 +17,8 @@
   "keywords": [
     "discord",
     "bot",
-    "link-cleaner"
+    "scheduler",
+    "twitter"
   ],
   "author": "AARENKAY",
   "license": "MIT"

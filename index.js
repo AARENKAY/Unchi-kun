@@ -20,24 +20,12 @@ const { promisify } = require('util');
 // =====================================================================
 
 // ---------------------------------------------------------------------
-//  1) DISCORD CHANNELS / BOTS
+//  1) DISCORD CHANNELS
 // ---------------------------------------------------------------------
 const LOG_CHANNEL_ID  = '1530804280720887918';   // logs and errors are sent here
-const TEST_CHANNEL_ID = '1537376472149524480';   // "#test" messages are re-posted here
-const TARGET_BOT_IDS  = ['1531274702067073157']; // bots whose messages get cleaned
 
 // ---------------------------------------------------------------------
-//  2) LINK CLEANER
-// ---------------------------------------------------------------------
-// channel ID -> list of subreddits (lowercase) that get redirected there
-const SUBREDDIT_CHANNEL_GROUPS = {
-  '1544045468013559880': ['scatporn2', 'pee', 'girlsfarting']
-};
-const ALLOWED_EXTS = ['.mp4', '.gif', '.gifv', '.webm'];   // link types that are kept
-const REDDIT_NATIVE_DOMAINS = ['i.redd.it', 'v.redd.it'];  // preferred over other links
-
-// ---------------------------------------------------------------------
-//  3) SCHEDULED FILE POSTER
+//  2) SCHEDULED FILE POSTER
 // ---------------------------------------------------------------------
 const SCHEDULER_ENABLED = true;        // false = turn the whole scheduler off
 const TIMEZONE          = 'Asia/Kolkata';
@@ -126,16 +114,8 @@ app.get('/health', (req, res) =>
     timestamp: new Date().toISOString()
   })
 );
-app.get('/', (req, res) => res.send('Discord Link Cleaner Bot - Health: /health'));
+app.get('/', (req, res) => res.send('Discord Bot - Health: /health'));
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Health server on port ${PORT}`));
-
-// ---------- LOOKUP MAPS ----------
-const SUBREDDIT_CHANNEL_MAP = Object.fromEntries(
-  Object.entries(SUBREDDIT_CHANNEL_GROUPS)
-    .flatMap(([channelId, subreddits]) =>
-      subreddits.map(sub => [sub.toLowerCase(), channelId])
-    )
-);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -197,11 +177,10 @@ process.on('unhandledRejection', err => {
 
 // ---------- ON/OFF SWITCHES (use /turn-on, /turn-off and /status in Discord) ----------
 const FEATURES = {
-  reddit:    'Reddit link cleaner',
   twitter:   'Twitter link converter',
   scheduler: 'Scheduled file poster'
 };
-const features = { reddit: true, twitter: true, scheduler: true };   // defaults when nothing is saved yet
+const features = { twitter: true, scheduler: true };   // defaults when nothing is saved yet
 const STATE_PREFIX = '⚙️ BOT_STATE ';   // the bot keeps its switches in one pinned message in the log channel
 let stateMessage = null;
 
@@ -286,192 +265,6 @@ const statusText = () =>
   Object.entries(FEATURES)
     .map(([key, label]) => `${features[key] ? '🟢' : '🔴'} **${key}** - ${label}`)
     .join('\n');
-
-// ---------- HELPERS ----------
-const cleanUrl = url => {
-  if (!url) return url;
-  let c = url.replace('www.redgifs.com', 'redgifs.com');
-  if (c.includes('preview.redd.it')) {
-    const m = c.match(/preview\.redd\.it\/([^?]+)/);
-    if (m) c = `https://i.redd.it/${m[1].split('?')[0]}`;
-  }
-  return c.split('?')[0].replace(/\/+$/, '');
-};
-
-const formatMessage = async (ch, postInfo, urls) => {
-  const { title, subreddit, author, subredditLink, postLink } = postInfo;
-
-  let msg = `# [${title}](<${postLink || '#'}>)\n`;
-  msg += `*Posted in:*  **[r/${subreddit}](<${subredditLink || '#'}>)**   *By:*  **${author}**`;
-
-  for (const url of urls) {
-    msg += `[.](${url})\n`;
-  }
-
-  if (msg.length > 1900) {
-    const chunks = msg.match(/[\s\S]{1,1900}/g) || [];
-    for (const chunk of chunks) {
-      await ch.send(chunk);
-    }
-  } else {
-    await ch.send(msg);
-  }
-  await ch.send('────────── • ────────── • ────────── • ──────────');
-};
-
-const getPostInfo = content => {
-  let title = 'Reddit Post';
-  let subreddit = 'unknown';
-  let author = 'unknown';
-  let subredditLink = '#';
-  let postLink = '#';
-
-  const subredditMatch = content.match(/r\/\[([^\]]+)\]/i);
-  if (subredditMatch) subreddit = subredditMatch[1].trim();
-
-  const subredditLinkMatch = content.match(/r\/\[[^\]]+\]\(<([^>]+)>\)/i);
-  if (subredditLinkMatch) subredditLink = subredditLinkMatch[1].trim();
-
-  const postMatch = content.match(/:\s*\[([\s\S]*)\]\(<([^>]+)>\)/i);
-  if (postMatch) {
-    title = postMatch[1].replace(/\s+/g, ' ').trim();
-    postLink = postMatch[2].trim();
-  }
-
-  const authorMatch = content.match(/\*by\s+([^*\s·]+)/i);
-  if (authorMatch) author = authorMatch[1].trim();
-
-  title = title.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}]/gu, '').trim();
-  if (!title) title = 'Reddit Post';
-
-  return { title, subreddit, author, subredditLink, postLink };
-};
-
-// ---------- REDDIT PROCESSING LOGIC ----------
-async function processRedditMessage(msg) {
-  const isTest = msg.content.trim().match(/^#test\b/i);
-  const mode = isTest ? '🧪 TEST' : '📩';
-
-  console.log(`\n${mode} New message from *${msg.author.tag}* in <#${msg.channel.id}>\n📝 **Content:**\n${msg.content.slice(0, 500)}${msg.content.length > 500 ? '...' : ''}`);
-
-  const urls = msg.content.match(/https?:\/\/[^\s<>"]+/gi);
-  if (!urls) {
-    console.log(`ℹ️ No URLs found in message`);
-    return;
-  }
-
-  const postInfo = getPostInfo(msg.content);
-  console.log(`ℹ️ Post info - Title: "${postInfo.title}", Sub: ${postInfo.subreddit}, Author: ${postInfo.author}`);
-
-  // Check for restricted tags in title
-  const restrictedPattern = /\[m\]|\(m\)|\[nb\]|\(nb\)|\[tf\]|\(tf\)|\[tm\]|\(tm\)/i;
-  if (postInfo.title && restrictedPattern.test(postInfo.title)) {
-    console.log(`🚫 Title contains forbidden tags, ${isTest ? 'skipping test' : 'deleting message without repost'}.`);
-    if (!isTest) {
-      await msg.delete().catch(console.error);
-      console.log(`🚫 Deleted message from **${msg.author.tag}** because title contains restricted tags: ${postInfo.title}`);
-    }
-    return;
-  }
-
-  let allowed = [], blocked = [], seen = new Set();
-
-  for (const u of urls) {
-    const clean = cleanUrl(u);
-    if (seen.has(clean)) continue;
-    seen.add(clean);
-    const low = clean.toLowerCase();
-    if (
-      low.includes('redgifs.com') ||
-      low.includes('v.redd.it') ||
-      ALLOWED_EXTS.some(ext => low.includes(ext) || low.endsWith(ext))
-    ) {
-      allowed.push(clean);
-    } else {
-      blocked.push(clean);
-    }
-  }
-
-  let allAllowed = [...allowed];
-
-  const hasRedditNative = allAllowed.some(url =>
-    REDDIT_NATIVE_DOMAINS.some(domain => url.includes(domain))
-  );
-  if (hasRedditNative) {
-    allAllowed = allAllowed.filter(url =>
-      REDDIT_NATIVE_DOMAINS.some(domain => url.includes(domain))
-    );
-  }
-
-  console.log(
-    `🔎 **Analysis:**\n• From: **${msg.author.tag}**\n• Title: ${postInfo.title}\n• Subreddit: r/${postInfo.subreddit}\n` +
-    `• URLs: ${urls.length} total, ${allAllowed.length} allowed, ${blocked.length} blocked\n` +
-    (allAllowed.length ? `• Allowed: ${allAllowed.join(', ')}` : '') +
-    (blocked.length ? `\n• Blocked: ${blocked.join(', ')}` : '')
-  );
-
-  if (allAllowed.length === 0 && blocked.length) {
-    console.log(`🗑️ No allowed URLs, ${isTest ? 'nothing to send' : 'deleting original message'}`);
-    if (!isTest) {
-      // a failed delete (already deleted / missing permission) must not crash the bot
-      await msg.delete().catch(console.error);
-    }
-    return;
-  }
-
-  if (allAllowed.length) {
-    try {
-      if (!isTest) {
-        console.log(`🗑️ Deleting original message...`);
-        await msg.delete();
-        console.log(`✅ Original message deleted`);
-      } else {
-        console.log(`🧪 Test mode – original message kept.`);
-      }
-
-      let targetChannel;
-      if (isTest) {
-        targetChannel = await client.channels.fetch(TEST_CHANNEL_ID);
-        if (!targetChannel) {
-          console.error(`❌ Test channel ${TEST_CHANNEL_ID} not found, falling back to original.`);
-          targetChannel = msg.channel;
-        } else {
-          console.log(`🔄 Test message sent to <#${TEST_CHANNEL_ID}>`);
-        }
-      } else {
-        targetChannel = msg.channel;
-        const subForRedirect = postInfo.subreddit.toLowerCase();
-        if (SUBREDDIT_CHANNEL_MAP[subForRedirect]) {
-          try {
-            const channelId = SUBREDDIT_CHANNEL_MAP[subForRedirect];
-            const fetchedChannel = await client.channels.fetch(channelId, { force: true });
-            if (!fetchedChannel) {
-              console.error(`❌ Channel ${channelId} not found (null), falling back to original`);
-            } else {
-              targetChannel = fetchedChannel;
-              console.log(`🔄 Redirected to <#${channelId}> for subreddit r/${subForRedirect}`);
-            }
-          } catch (e) {
-            console.error(`❌ Redirect fetch failed (${e.code}): ${e.message}. Falling back to original channel.`);
-          }
-        }
-      }
-
-      console.log(`📤 Sending cleaned message to ${targetChannel.id}...`);
-      await formatMessage(targetChannel, postInfo, allAllowed);
-      console.log(`✅ Cleaned message sent`);
-
-      await sleep(2000);
-      const redirectInfo = targetChannel.id !== msg.channel.id ? `\n• Redirected to <#${targetChannel.id}>` : '';
-      console.log(
-        `✅ **Cleaned:**\n• From: **${msg.author.tag}**\n• Posted: ${allAllowed.length} URLs\n• Blocked: ${blocked.length} URLs` +
-        redirectInfo
-      );
-    } catch (e) {
-      console.error(`❌ Error: ${e.message}\n• From: **${msg.author.tag}**`);
-    }
-  }
-}
 
 // ---------- SCHEDULED FILE POSTER ----------
 const run = promisify(execFile);
@@ -801,16 +594,6 @@ client.on('interactionCreate', async i => {
 client.on('messageCreate', async msg => {
   try {
     if (msg.author.id === client.user.id) return;
-
-    // ---- Reddit cleaning: target bots OR #test command ----
-    const isTargetBot = TARGET_BOT_IDS.includes(msg.author.id);
-    const isTestCommand = msg.content.trim().match(/^#test\b/i) && !isTargetBot;
-
-    if (isTargetBot || isTestCommand) {
-      if (!features.reddit) return;   // switched off with /turn-off reddit
-      await processRedditMessage(msg);
-      return;
-    }
 
     // ---- Twitter conversion ----
     if (!features.twitter) return;   // switched off with /turn-off twitter
