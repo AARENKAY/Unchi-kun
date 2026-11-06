@@ -57,23 +57,6 @@ const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command afte
 // low, errors, files stuck in "posting"). Leave it '' to use the global LOG_CHANNEL_ID above.
 const SCHEDULES = [
   {
-    channelId: '1566080373899657277',  // right-click channel -> Copy Channel ID
-    logChannelId: '',                  // log channel for this schedule ('' = use the global one)
-    cron: '0 * * * *',               // WHEN to post (cheat-sheet below)
-    queue: [                           // files waiting to be posted (add more folders here)
-      'pikpak2:Discord/queue',
-      'pikpak2:Discord/queue2',
-      'pikpak2:Discord/queue3',
-    ],
-    posting:  'pikpak2:Discord/posting',       // temporary "claimed" folder (prevents double posts)
-    posted:   'pikpak2:Discord/posted',        // files already posted
-    rejected: 'pikpak2:Discord/rejected',      // files too big for Discord
-    perPost: 1,                        // files per post (1-10)
-    random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
-    spoiler: false,                    // true = hide files behind a spoiler
-    caption: ''                        // optional text sent with each post
-  },
-  {
     channelId: '1567144051797401630',  // right-click channel -> Copy Channel ID
     logChannelId: '',                  // log channel for this schedule ('' = use the global one)
     cron: '5 * * * *',              // WHEN to post (cheat-sheet below)
