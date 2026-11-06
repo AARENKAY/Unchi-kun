@@ -57,7 +57,7 @@ const SCHEDULES = [
     posted:   'pikpak2:AiXstasy/posted',        // files already posted
     rejected: 'pikpak2:AiXstasy/rejected',      // files too big for Discord
     perPost: 1,                        // files per post (1-10)
-    random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
+    random: false,                      // true = random order, false = alphabetical (001_, 002_, ...)
     spoiler: false,                    // true = hide files behind a spoiler
     caption: ''                        // optional text sent with each post
   },
@@ -72,7 +72,7 @@ const SCHEDULES = [
     posted:   'pikpak2:Jade/posted',        // files already posted
     rejected: 'pikpak2:Jade/rejected',      // files too big for Discord
     perPost: 1,                        // files per post (1-10)
-    random: true,                      // true = random order, false = alphabetical (001_, 002_, ...)
+    random: false,                      // true = random order, false = alphabetical (001_, 002_, ...)
     spoiler: false,                    // true = hide files behind a spoiler
     caption: ''                        // optional text sent with each post
   }
