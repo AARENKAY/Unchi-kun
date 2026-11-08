@@ -75,6 +75,22 @@ const SCHEDULES = [
     random: false,                      // true = random order, false = alphabetical (001_, 002_, ...)
     spoiler: false,                    // true = hide files behind a spoiler
     caption: ''                        // optional text sent with each post
+  },
+  {
+    channelId: '1504738628725899324',  // right-click channel -> Copy Channel ID
+    logChannelId: '',                  // log channel for this schedule ('' = use the global one)
+    cron: '0 * * * *',              // WHEN to post (cheat-sheet below)
+    queue: [                           // files waiting to be posted (add more folders here)
+      'pikpak2:nonJAV/queue',
+      'pikpak2:nonJAV/queue2'
+    ],
+    posting:  'pikpak2:nonJAV/posting',       // temporary "claimed" folder (prevents double posts)
+    posted:   'pikpak2:nonJAV/posted',        // files already posted
+    rejected: 'pikpak2:nonJAV/rejected',      // files too big for Discord
+    perPost: 1,                        // files per post (1-10)
+    random: false,                      // true = random order, false = alphabetical (001_, 002_, ...)
+    spoiler: false,                    // true = hide files behind a spoiler
+    caption: ''                        // optional text sent with each post
   }
 ];
 
