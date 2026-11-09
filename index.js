@@ -62,7 +62,7 @@ const SCHEDULES = [
   {
     channelId: '1504738628725899324',  // right-click channel -> Copy Channel ID
     logChannelId: '',                  // log channel for this schedule ('' = use the global one)
-    cron: '0 12 * * *',              // WHEN to post (cheat-sheet below)
+    cron: '0 0 * * *',              // WHEN to post (cheat-sheet below)
     queue: [                           // files waiting to be posted (add more folders here)
       'pikpak2:nonJAV/queue',
       'pikpak2:nonJAV/queue2'
