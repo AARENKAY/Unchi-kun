@@ -30,7 +30,7 @@ const LOG_CHANNEL_ID  = '1530804280720887918';   // logs and errors are sent her
 const SCHEDULER_ENABLED = true;        // false = turn the whole scheduler off
 const TIMEZONE          = 'Asia/Kolkata';
 const MAX_UPLOAD_MB     = 11;          // Discord upload limit per post (raise if server is boosted)
-const FILE_EXTS         = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm'];   // file types picked from the queue (add or remove as needed)
+const FILE_EXTS         = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.m4v', '.webm'];   // file types picked from the queue (add or remove as needed)
 const LOW_QUEUE_WARNING = 5;           // log a warning when this many files or fewer are left (0 = off)
 const RCLONE_TIMEOUT_SEC = 120;        // give up on a stuck rclone command after this long
 
